@@ -1,0 +1,35 @@
+# データセット（大容量のため除外）
+images/
+images_*/
+*.zip
+*.png
+*.jpg
+*.jpeg
+
+# モデルの重み
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# TensorBoardログ
+runs/
+
+# Python仮想環境
+chestxray_env/
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+
+# ログ
+*.log
+nohup.out
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
