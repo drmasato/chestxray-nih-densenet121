@@ -54,15 +54,45 @@ tf = transforms.Compose([
 # ===== DICOM読み込み =====
 def load_dicom(path):
     dcm = pydicom.dcmread(path)
+
+    # pixel_array取得
     arr = dcm.pixel_array.astype(float)
+
+    # マルチフレームの場合は最初のフレームを使用
+    if arr.ndim == 3 and arr.shape[0] > 3:
+        arr = arr[0]
+
+    # Photometric Interpretationに応じた反転処理
+    pi = getattr(dcm, 'PhotometricInterpretation', '')
+    if pi == 'MONOCHROME1':
+        arr = arr.max() - arr  # 白黒反転
+
+    # ウィンドウ処理（VOI LUT があれば使用、なければ正規化）
+    try:
+        from pydicom.pixels import apply_voi_lut
+        arr = apply_voi_lut(arr, dcm).astype(float)
+    except Exception:
+        pass
+
+    # 0〜255に正規化
     arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255
     pil_img = Image.fromarray(arr.astype(np.uint8)).convert('RGB')
 
-    # メタ情報取得（匿名化：患者名・IDは取得しない）
-    date     = getattr(dcm, 'StudyDate',    '不明')
-    view     = getattr(dcm, 'ViewPosition', '不明')
-    meta_str = f"撮影日: {date}　体位: {view}"
+    # メタ情報取得（患者名・IDは取得しない）
+    date     = str(getattr(dcm, 'StudyDate',    '不明'))
+    view     = str(getattr(dcm, 'ViewPosition', '不明'))
+    modality = str(getattr(dcm, 'Modality',     '不明'))
+    meta_str = f"モダリティ: {modality}　撮影日: {date}　体位: {view}"
     return pil_img, meta_str
+
+# ===== DICOMかどうかをマジックバイトで判定 =====
+def is_dicom(path):
+    try:
+        with open(path, 'rb') as f:
+            f.seek(128)
+            return f.read(4) == b'DICM'
+    except Exception:
+        return False
 
 # ===== 推論関数 =====
 def predict(file_obj):
@@ -73,7 +103,7 @@ def predict(file_obj):
     ext  = os.path.splitext(path)[-1].lower()
     meta_info = ""
 
-    if ext == '.dcm':
+    if ext == '.dcm' or is_dicom(path):
         pil_img, meta_info = load_dicom(path)
     else:
         pil_img = Image.open(path).convert('RGB')
@@ -135,7 +165,6 @@ with gr.Blocks(title="胸部X線AI診断") as demo:
         with gr.Column(scale=1):
             file_input  = gr.File(
                 label="胸部X線画像をアップロード（DICOM / PNG / JPG）",
-                file_types=[".dcm", ".png", ".jpg", ".jpeg"]
             )
             meta_output = gr.Textbox(label="DICOMメタ情報", interactive=False)
             run_btn     = gr.Button("診断する", variant="primary")
