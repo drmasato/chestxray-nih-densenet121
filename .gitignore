@@ -2,9 +2,13 @@
 images/
 images_*/
 *.zip
-*.png
 *.jpg
 *.jpeg
+
+# 画像ファイル（resultsフォルダ内は除く）
+*.png
+!results/**/*.png
+!results/*.png
 
 # モデルの重み
 checkpoints/
