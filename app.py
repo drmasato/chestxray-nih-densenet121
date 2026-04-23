@@ -183,7 +183,7 @@ def generate_report(probs):
 # ===== 推論関数 =====
 def predict(file_obj):
     if file_obj is None:
-        return {}, None, None, "", ""
+        return {}, None, None, None, "", ""
 
     path = file_obj.name
     ext  = os.path.splitext(path)[-1].lower()
@@ -241,7 +241,8 @@ def predict(file_obj):
     # レポート生成
     report = generate_report(probs)
 
-    return label_dict, cam_pil, fig, meta_info, report
+    orig_pil = pil_img.resize((224, 224))
+    return label_dict, orig_pil, cam_pil, fig, meta_info, report
 
 # ===== Gradio UI =====
 with gr.Blocks(title="胸部X線AI診断") as demo:
@@ -260,8 +261,9 @@ with gr.Blocks(title="胸部X線AI診断") as demo:
             meta_output = gr.Textbox(label="DICOMメタ情報", interactive=False)
             run_btn     = gr.Button("診断する", variant="primary")
 
-        with gr.Column(scale=1):
-            cam_output  = gr.Image(label="Grad-CAM（注目領域）")
+    with gr.Row():
+        orig_output = gr.Image(label="元画像", )
+        cam_output  = gr.Image(label="Grad-CAM（注目領域）", )
 
     with gr.Row():
         label_output = gr.Label(num_top_classes=5, label="上位5疾患")
@@ -277,7 +279,7 @@ with gr.Blocks(title="胸部X線AI診断") as demo:
     run_btn.click(
         fn=predict,
         inputs=file_input,
-        outputs=[label_output, cam_output, chart_output, meta_output, report_output]
+        outputs=[label_output, orig_output, cam_output, chart_output, meta_output, report_output]
     )
 
     gr.Markdown("""
@@ -291,4 +293,4 @@ with gr.Blocks(title="胸部X線AI診断") as demo:
     """)
 
 if __name__ == '__main__':
-    demo.launch(share=False, server_port=7861)
+    demo.launch(share=False, server_port=7862)
