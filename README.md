@@ -1,168 +1,154 @@
-# 胸部X線画像診断AI（NIH ChestX-ray14）
+# 胸部X線AI診断システム
 
-DenseNet-121による胸部X線画像の多疾患分類モデル。NIH ChestX-ray14データセット（112,120枚）を用いて14種類の胸部疾患を検出する。
+NIH ChestX-ray14 データセットで学習した多疾患分類モデルと、Gradio ベースの臨床向け Web インターフェースです。
+
+---
+
+## 概要
+
+| 項目 | 内容 |
+|------|------|
+| データセット | NIH ChestX-ray14（112,120枚 / 14疾患） |
+| 最高精度 | **Mean AUC: 0.8123**（DenseNet-121 + EfficientNet-B4 アンサンブル） |
+| 対応入力 | DICOM / PNG / JPG（拡張子なし DICOM も自動検出） |
+| 出力 | 疾患確率・Grad-CAM・AI自動読影レポート |
+| GPU | NVIDIA GTX 1080 Ti（11GB VRAM） |
+
+---
+
+## 要件定義・実施内容
+
+### ステップ 1: DenseNet-121 ベースライン学習
+- **モデル**: DenseNet-121（ImageNet 事前学習 → NIH 転移学習）
+- **設定**: 224px, Batch=32, LR=1e-4, 30 epochs, AdamW, CosineAnnealingLR
+- **対策**: BCEWithLogitsLoss + pos_weight（クラス不均衡補正）, Mixed precision (AMP)
+- **結果**: Mean AUC **0.8004**
+
+### ステップ 2: EfficientNet-B4 学習 + アンサンブル
+- **モデル**: EfficientNet-B4（timm, drop_rate=0.3, drop_path_rate=0.1）
+- **対策**: 勾配クリッピング（max_norm=1.0）, EarlyStopping（PATIENCE=5）
+- **結果**: EfficientNet-B4 単体 Mean AUC **0.7964**
+- **アンサンブル**（均等平均 0.5:0.5）: Mean AUC **0.8123**（+1.2% 向上）
+
+### ステップ 3: torchxrayvision 事前学習モデル Fine-tuning
+- **ベースモデル**: densenet121-res224-all（NIH + CheXpert + MIMIC-CXR + PadChest 4データセット事前学習）
+- **分類層**: 事前学習済み重みを14疾患分引き継ぎ
+- **段階的学習率**: backbone 5e-5 / head 1e-3
+- **期待 AUC**: 0.83+
+
+### Gradio Web アプリ
+- DICOM マジックバイト検出（拡張子なしファイル対応）
+- VOI LUT / MONOCHROME1 反転 / マルチフレーム対応
+- 元画像 + Grad-CAM 横並び表示・クリック拡大
+- AI 自動読影レポート（所見・インプレッション・推奨アクション）
+- DenseNet + EfficientNet アンサンブル推論
+
+---
+
+## 精度結果
+
+### モデル比較（NIH テストセット）
+
+| モデル | Mean AUC |
+|--------|----------|
+| **Ensemble DenseNet+EfficientNet** | **0.8123** |
+| EfficientNet-B4（epoch5 best） | 0.8051 |
+| DenseNet-121（baseline） | 0.8004 |
+| torchxrayvision Fine-tune（予定） | 0.83+ |
+
+> **参考**: CheXNet（Stanford, 2017） Mean AUC: 0.841 / 放射線科医: 0.778
+
+### 疾患別 AUC（アンサンブルモデル）
+
+| 疾患 | AUC | 疾患 | AUC |
+|------|-----|------|-----|
+| ヘルニア | **0.9421** | 肺気腫 | **0.8992** |
+| 心肥大 | **0.8924** | 気胸 | 0.8640 |
+| 肺水腫 | 0.8451 | 肺線維症 | 0.8354 |
+| 胸水 | 0.8257 | 腫瘤 | 0.8111 |
+| 胸膜肥厚 | 0.7732 | 無気肺 | 0.7708 |
+| 結節 | 0.7582 | 浸潤影 | 0.7477 |
+| 肺炎 | 0.7049 | 浸潤 | 0.7017 |
+
+---
+
+## ファイル構成
+
+```
+chestxray/
+├── app.py                  # Gradio Web アプリ（メイン）
+├── train.py                # DenseNet-121 学習
+├── train_efficientnet.py   # EfficientNet-B4 学習
+├── train_pretrained.py     # torchxrayvision Fine-tuning（Step3）
+├── ensemble.py             # アンサンブル評価・記録
+├── benchmark.py            # AUC 評価・記録ユーティリティ
+├── evaluate.py             # テストセット評価 + グラフ生成
+├── gradcam.py              # Grad-CAM 可視化
+├── benchmark_results.csv   # 全モデルのベンチマーク記録
+└── checkpoints/
+    ├── best_model.pth              # DenseNet-121 best
+    ├── efficientnet_b4_best.pth    # EfficientNet-B4 best
+    └── xrv_densenet_finetuned.pth  # XRV fine-tuned（Step3完了後）
+```
+
+---
+
+## 使い方
+
+### 1. Web アプリ起動
+
+```bash
+source /media/morita/ubuntuHDD/chestxray_env/bin/activate
+python3 app.py
+# → http://localhost:7862 をブラウザで開く
+```
+
+### 2. 画像をアップロード
+- **対応形式**: DICOM（拡張子なし可）/ PNG / JPG
+- 病院 PACS からエクスポートした DICOM ファイルをそのままドロップ可能
+
+### 3. 「診断する」をクリック
+以下が自動生成されます：
+- **元画像** + **Grad-CAM**（AI が注目した領域を重ねて表示、クリックで拡大）
+- **上位5疾患の確率**
+- **疾患別確率グラフ**（赤: 陽性疑い ≥50%）
+- **AI 自動読影レポート**（所見・インプレッション・推奨アクション）
+
+### 4. ベンチマーク記録
+
+```bash
+python3 benchmark.py        # リーダーボード表示
+python3 record_densenet.py  # DenseNet-121 を再評価・記録
+python3 ensemble.py         # アンサンブル評価
+```
 
 ---
 
 ## 動作環境
 
-| 項目 | バージョン |
-|------|----------|
-| OS | Ubuntu 22.04 / 24.04 |
-| Python | 3.11以上 |
-| PyTorch | 2.6.0+cu124 |
-| CUDA | 12.4 |
-| GPU | NVIDIA GTX 1080 Ti（VRAM 11GB） |
-
----
-
-## セットアップ
-
-### 1. リポジトリのクローン
-
-```bash
-git clone <repository_url>
-cd chestxray
 ```
-
-### 2. 仮想環境の作成・有効化
-
-```bash
-python3 -m venv chestxray_env
-source chestxray_env/bin/activate
-```
-
-### 3. 依存ライブラリのインストール
-
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-pip install pandas scikit-learn albumentations matplotlib tqdm tensorboard grad-cam
-```
-
-### 4. データセットのダウンロード
-
-```bash
-pip install kaggle
-
-# Kaggle APIキーを設定（~/.kaggle/kaggle.json）
-kaggle datasets download -d nih-chest-xrays/data -p ./
-
-# 解凍
-unzip data.zip -d ./
-
-# 全画像を1フォルダに統合
-mkdir -p images
-for i in $(seq -w 1 12); do
-  mv images_0${i}/images/*.png images/
-done
+OS:      Ubuntu 24.04
+GPU:     NVIDIA GTX 1080 Ti (11GB VRAM)
+CUDA:    12.2
+Python:  3.12
+PyTorch: 2.6.0+cu124
+timm:    1.0.26
+gradio:  6.12.0
+pydicom: 3.0.2
+torchxrayvision: 1.4.0
 ```
 
 ---
 
-## ディレクトリ構成
+## 免責事項
 
-```
-chestxray/
-├── images/                  # 112,120枚の画像（PNG）
-├── Data_Entry_2017.csv      # ラベルデータ
-├── train_val_list.txt       # 訓練・検証用ファイルリスト
-├── test_list.txt            # テスト用ファイルリスト
-├── BBox_List_2017.csv       # バウンディングボックス情報
-├── train.py                 # 学習スクリプト
-├── checkpoints/
-│   └── best_model.pth       # ベストモデル
-├── runs/                    # TensorBoardログ
-├── 要件定義書.md
-└── README.md
-```
-
----
-
-## 学習
-
-```bash
-source chestxray_env/bin/activate
-
-# 学習開始
-python3 train.py
-
-# バックグラウンドで実行
-nohup python3 train.py > train.log 2>&1 &
-
-# 進捗確認
-tail -f train.log
-```
-
-### 主要パラメータ（train.py）
-
-| パラメータ | デフォルト値 | 説明 |
-|----------|------------|------|
-| BATCH_SIZE | 32 | バッチサイズ |
-| EPOCHS | 30 | 学習エポック数 |
-| LR | 1e-4 | 学習率 |
-| NUM_WORKERS | 8 | データローダーのワーカー数 |
-
----
-
-## 学習の可視化
-
-```bash
-source chestxray_env/bin/activate
-tensorboard --logdir runs
-
-# ブラウザで確認
-# http://localhost:6006
-```
-
----
-
-## 対象疾患（14クラス）
-
-| 疾患名 | 日本語 |
-|--------|--------|
-| Atelectasis | 無気肺 |
-| Consolidation | 浸潤影 |
-| Infiltration | 浸潤 |
-| Pneumothorax | 気胸 |
-| Edema | 肺水腫 |
-| Emphysema | 肺気腫 |
-| Fibrosis | 肺線維症 |
-| Effusion | 胸水 |
-| Pneumonia | 肺炎 |
-| Pleural_Thickening | 胸膜肥厚 |
-| Cardiomegaly | 心肥大 |
-| Nodule | 結節 |
-| Mass | 腫瘤 |
-| Hernia | ヘルニア |
-
----
-
-## 評価指標
-
-AUC-ROC を疾患ごとに計算し、Mean AUCで総合評価する。
-
-| モデル | Mean AUC |
-|--------|---------|
-| 論文ベースライン（DenseNet-121） | 0.841 |
-| 本プロジェクト目標 | 0.800以上 |
-
----
-
-## GPU使用状況の確認
-
-```bash
-# リアルタイム監視
-watch -n 2 nvidia-smi
-
-# 学習中のGPU使用率
-nvidia-smi | grep GPU-Util
-```
+> ⚠️ 本システムは**研究・学習目的**のみです。実際の診断・治療判断には使用しないでください。
+> 患者データを使用する場合は必ず**匿名化**を行ってください。
 
 ---
 
 ## 参考文献
 
-- Wang et al., "ChestX-ray8: Hospital-scale Chest X-ray Database and Benchmarks", CVPR 2017
-- Rajpurkar et al., "CheXNet: Radiologist-Level Pneumonia Detection on Chest X-Rays with Deep Learning", 2017
-- [NIH Clinical Center ChestX-ray Dataset](https://nihcc.app.box.com/v/ChestXray-NIHCC)
-- [Kaggle Dataset](https://www.kaggle.com/datasets/nih-chest-xrays/data)
+- [NIH ChestX-ray14 Dataset](https://nihcc.app.box.com/v/ChestXray-NIHCC)
+- [CheXNet: Radiologist-Level Pneumonia Detection (Stanford, 2017)](https://arxiv.org/abs/1711.05225)
+- [torchxrayvision](https://github.com/mlmed/torchxrayvision)
