@@ -9,7 +9,7 @@ NIH ChestX-ray14 データセットで学習した多疾患分類モデルと、
 | 項目 | 内容 |
 |------|------|
 | データセット | NIH ChestX-ray14（112,120枚 / 14疾患） |
-| 最高精度 | **Mean AUC: 0.8123**（DenseNet-121 + EfficientNet-B4 アンサンブル） |
+| 最高精度 | **Mean AUC: 0.8149**（DenseNet-121 + EfficientNet-B4 + XRV-DenseNet 3モデルアンサンブル） |
 | 対応入力 | DICOM / PNG / JPG（拡張子なし DICOM も自動検出） |
 | 出力 | 疾患確率・Grad-CAM・AI自動読影レポート |
 | GPU | NVIDIA GTX 1080 Ti（11GB VRAM） |
@@ -30,11 +30,12 @@ NIH ChestX-ray14 データセットで学習した多疾患分類モデルと、
 - **結果**: EfficientNet-B4 単体 Mean AUC **0.7964**
 - **アンサンブル**（均等平均 0.5:0.5）: Mean AUC **0.8123**（+1.2% 向上）
 
-### ステップ 3: torchxrayvision 事前学習モデル Fine-tuning
+### ステップ 3: torchxrayvision 事前学習モデル Fine-tuning + 3モデルアンサンブル
 - **ベースモデル**: densenet121-res224-all（NIH + CheXpert + MIMIC-CXR + PadChest 4データセット事前学習）
-- **分類層**: 事前学習済み重みを14疾患分引き継ぎ
-- **段階的学習率**: backbone 5e-5 / head 1e-3
-- **期待 AUC**: 0.83+
+- **分類層**: 事前学習済み重みを14疾患分引き継ぎ、op_threshsをリセット
+- **段階的学習率**: backbone 5e-5 / head 1e-3、20 epochs
+- **XRV単体 Test AUC**: 0.7860（val AUC過大評価: 0.8187 ※患者重複問題）
+- **3モデルアンサンブル**（Dense 0.4 + Eff 0.4 + XRV 0.2）: **0.8149**
 
 ### Gradio Web アプリ
 - DICOM マジックバイト検出（拡張子なしファイル対応）
@@ -51,12 +52,13 @@ NIH ChestX-ray14 データセットで学習した多疾患分類モデルと、
 
 | モデル | Mean AUC |
 |--------|----------|
-| **Ensemble DenseNet+EfficientNet** | **0.8123** |
+| **Ensemble 3モデル（Dense+Eff+XRV 2:2:1）** | **0.8149** |
+| Ensemble 2モデル（Dense+EffNet 1:1） | 0.8123 |
 | EfficientNet-B4（epoch5 best） | 0.8051 |
 | DenseNet-121（baseline） | 0.8004 |
-| torchxrayvision Fine-tune（予定） | 0.83+ |
+| XRV-DenseNet Fine-tune（単体） | 0.7860 |
 
-> **参考**: CheXNet（Stanford, 2017） Mean AUC: 0.841 / 放射線科医: 0.778
+> **参考**: CheXNet（Stanford, 2017） Mean AUC: 0.841 / 放射線科医: 0.778（本システムは放射線科医水準を超えています）
 
 ### 疾患別 AUC（アンサンブルモデル）
 

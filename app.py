@@ -9,6 +9,7 @@ import pydicom
 import os
 import datetime
 import timm
+import torchxrayvision as xrv
 from pytorch_grad_cam import GradCAM
 from pytorch_grad_cam.utils.image import show_cam_on_image
 import matplotlib
@@ -20,6 +21,7 @@ import matplotlib.pyplot as plt
 
 MODEL_PATH   = '/media/morita/ubuntuHDD/chestxray/checkpoints/best_model.pth'
 EFFNET_PATH  = '/media/morita/ubuntuHDD/chestxray/checkpoints/efficientnet_b4_best.pth'
+XRV_PATH     = '/media/morita/ubuntuHDD/chestxray/checkpoints/xrv_densenet_finetuned.pth'
 THRESHOLD    = 0.5
 
 DISEASES    = [
@@ -48,13 +50,22 @@ model = ChestXrayModel().to(device)
 model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
 model.eval()
 
-# EfficientNet-B4（アンサンブル用）
+# EfficientNet-B4
 effnet = timm.create_model('efficientnet_b4', pretrained=False,
                             num_classes=14, drop_rate=0.3, drop_path_rate=0.1)
 effnet.load_state_dict(torch.load(EFFNET_PATH, map_location=device))
 effnet = effnet.to(device)
 effnet.eval()
-print(f"モデル読み込み完了 ({device})  DenseNet-121 + EfficientNet-B4 アンサンブル")
+
+# XRV-DenseNet（4データセット事前学習 Fine-tune）
+xrv_model = xrv.models.DenseNet(weights=None)
+xrv_model.classifier = nn.Linear(xrv_model.classifier.in_features, 14)
+xrv_model.op_threshs = None
+xrv_model.load_state_dict(torch.load(XRV_PATH, map_location=device))
+xrv_model = xrv_model.to(device)
+xrv_model.eval()
+
+print(f"モデル読み込み完了 ({device})  3モデルアンサンブル (DenseNet + EfficientNet + XRV)")
 
 tf = transforms.Compose([
     transforms.Resize(256),
@@ -135,7 +146,7 @@ def generate_report(probs):
         "=" * 48,
         "  胸部X線AI自動読影レポート",
         f"  生成日時: {now}",
-        f"  使用モデル: DenseNet-121 + EfficientNet-B4 アンサンブル (Mean AUC: 0.8123)",
+        f"  使用モデル: DenseNet-121 + EfficientNet-B4 + XRV-DenseNet 3モデルアンサンブル (Mean AUC: 0.8149)",
         "=" * 48,
         "",
         "【所見】",
@@ -198,11 +209,17 @@ def predict(file_obj):
     img_np   = np.array(img_rgb).astype(np.float32) / 255.0
     input_t  = tf(pil_img).unsqueeze(0).to(device)
 
-    # アンサンブル推論
+    # 3モデルアンサンブル推論（Dense:Eff:XRV = 0.4:0.4:0.2）
+    # XRV用に grayscale [-1024,1024] テンソルを準備
+    gray = pil_img.resize((224, 224)).convert('L')
+    gray_arr = (np.array(gray).astype(np.float32) / 255.0) * 2048.0 - 1024.0
+    xrv_t = torch.FloatTensor(gray_arr).unsqueeze(0).unsqueeze(0).to(device)
+
     with torch.no_grad():
         p_dense  = torch.sigmoid(model(input_t)).cpu().numpy()[0]
         p_effnet = torch.sigmoid(effnet(input_t)).cpu().numpy()[0]
-    probs = 0.5 * p_dense + 0.5 * p_effnet
+        p_xrv    = torch.sigmoid(xrv_model(xrv_t)).cpu().numpy()[0]
+    probs = 0.4 * p_dense + 0.4 * p_effnet + 0.2 * p_xrv
 
     # 結果ラベル（上位疾患）
     label_dict = {}
@@ -248,7 +265,7 @@ def predict(file_obj):
 with gr.Blocks(title="胸部X線AI診断") as demo:
     gr.Markdown("""
     # 胸部X線AI診断システム
-    **DenseNet-121 + EfficientNet-B4 アンサンブル / NIH ChestX-ray14学習済み（Mean AUC: 0.8123）**
+    **DenseNet-121 + EfficientNet-B4 + XRV-DenseNet 3モデルアンサンブル / NIH ChestX-ray14学習済み（Mean AUC: 0.8149）**
 
     > ⚠️ 本ツールは研究・学習目的のみです。臨床診断には使用しないでください。
     """)
