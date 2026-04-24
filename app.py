@@ -10,8 +10,23 @@ import os
 import datetime
 import timm
 import torchxrayvision as xrv
-from pytorch_grad_cam import GradCAM
+from pytorch_grad_cam import (
+    GradCAM, GradCAMPlusPlus, XGradCAM,
+    EigenCAM, EigenGradCAM, LayerCAM, HiResCAM, ScoreCAM
+)
 from pytorch_grad_cam.utils.image import show_cam_on_image
+from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+
+CAM_METHODS = {
+    'GradCAM':      GradCAM,
+    'GradCAM++':    GradCAMPlusPlus,
+    'XGradCAM':     XGradCAM,
+    'EigenCAM':     EigenCAM,
+    'EigenGradCAM': EigenGradCAM,
+    'LayerCAM':     LayerCAM,
+    'HiResCAM':     HiResCAM,
+    'ScoreCAM':     ScoreCAM,
+}
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.font_manager as fm
@@ -192,7 +207,7 @@ def generate_report(probs):
 
 
 # ===== 推論関数 =====
-def predict(file_obj):
+def predict(file_obj, cam_method='GradCAM++', cam_threshold=0.4):
     if file_obj is None:
         return {}, None, None, None, "", ""
 
@@ -226,18 +241,25 @@ def predict(file_obj):
     for jp, prob in zip(DISEASES_JP, probs):
         label_dict[jp] = float(prob)
 
-    # Grad-CAM（最も確率の高い疾患）
+    # CAM（最も確率の高い疾患）
     top_idx = int(np.argmax(probs))
+    top_name = DISEASES_JP[top_idx]
     target_layer = [model.model.features.denseblock4.denselayer16.conv2]
 
     try:
-        cam = GradCAM(model=model, target_layers=target_layer)
-        from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+        cam_cls = CAM_METHODS.get(cam_method, GradCAMPlusPlus)
+        cam = cam_cls(model=model, target_layers=target_layer)
         grayscale_cam = cam(input_tensor=input_t,
                             targets=[ClassifierOutputTarget(top_idx)])[0]
-        cam_img = show_cam_on_image(img_np, grayscale_cam, use_rgb=True)
+        # 閾値以下をゼロにして集中させる
+        focused = np.where(grayscale_cam >= cam_threshold, grayscale_cam, 0.0)
+        # 正規化
+        if focused.max() > 0:
+            focused = focused / focused.max()
+        cam_img = show_cam_on_image(img_np, focused, use_rgb=True)
         cam_pil = Image.fromarray(cam_img)
-    except Exception:
+    except Exception as e:
+        print(f"CAM error: {e}")
         cam_pil = pil_img
 
     # 棒グラフ
@@ -276,11 +298,21 @@ with gr.Blocks(title="胸部X線AI診断") as demo:
                 label="胸部X線画像をアップロード（DICOM / PNG / JPG）",
             )
             meta_output = gr.Textbox(label="DICOMメタ情報", interactive=False)
-            run_btn     = gr.Button("診断する", variant="primary")
+            with gr.Row():
+                cam_selector = gr.Dropdown(
+                    choices=list(CAM_METHODS.keys()),
+                    value='GradCAM++',
+                    label="CAM 手法",
+                )
+                cam_thresh = gr.Slider(
+                    minimum=0.0, maximum=0.9, value=0.4, step=0.05,
+                    label="集中度（高いほど狭い）",
+                )
+            run_btn = gr.Button("診断する", variant="primary")
 
     with gr.Row():
-        orig_output = gr.Image(label="元画像", )
-        cam_output  = gr.Image(label="Grad-CAM（注目領域）", )
+        orig_output = gr.Image(label="元画像")
+        cam_output  = gr.Image(label="CAM（注目領域）")
 
     with gr.Row():
         label_output = gr.Label(num_top_classes=5, label="上位5疾患")
@@ -295,16 +327,24 @@ with gr.Blocks(title="胸部X線AI診断") as demo:
 
     run_btn.click(
         fn=predict,
-        inputs=file_input,
+        inputs=[file_input, cam_selector, cam_thresh],
         outputs=[label_output, orig_output, cam_output, chart_output, meta_output, report_output]
     )
 
     gr.Markdown("""
     ### 使い方
     1. 胸部X線画像（**DICOM / PNG / JPG**）をアップロード
-    2. 「診断する」をクリック
-    3. 上位5疾患の確率と注目領域（Grad-CAM）を確認
-    4. **AI自動読影レポート**で所見・インプレッション・推奨事項を確認
+    2. **CAM 手法**と**集中度**を選択（デフォルト: GradCAM++ / 0.4）
+    3. 「診断する」をクリック
+    4. 元画像と CAM を比較 / AI自動読影レポートを確認
+
+    | 手法 | 特徴 |
+    |------|------|
+    | GradCAM++ | 標準より狭く正確、複数病変に強い |
+    | LayerCAM | 非常に精密・小病変向き |
+    | EigenCAM | グラデーションなし、安定 |
+    | HiResCAM | 高解像度 |
+    | ScoreCAM | 勾配不要、ノイズ少ない（低速） |
 
     > ⚠️ 実際の患者画像を使用する場合は**必ず匿名化済みのもの**を使用してください。
     """)
