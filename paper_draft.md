@@ -1,7 +1,7 @@
 # Multi-Dataset Pre-trained Ensemble Model for Automated Multi-Label Chest Radiograph Classification
 
 **Authors:** Masato Morita  
-**Affiliation:** [Institution]  
+**Affiliation:** Saiseikai Sakaiminato General Hospital, Sakaiminato, Tottori, Japan  
 **Contact:** drmasato2001@gmail.com  
 **Date:** April 2026  
 **Status:** Draft v1.0
