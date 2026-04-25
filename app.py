@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import pandas as pd
 import torchvision.transforms as transforms
 from torchvision import models
 from PIL import Image
@@ -81,6 +82,37 @@ xrv_model = xrv_model.to(device)
 xrv_model.eval()
 
 print(f"モデル読み込み完了 ({device})  3モデルアンサンブル (DenseNet + EfficientNet + XRV)")
+
+# ===== モデル選択マップ =====
+MODEL_OPTIONS = {
+    "Ensemble 3モデル (AUC: 0.8149) ★最新":  ("ensemble3",  None),
+    "Ensemble 2モデル (AUC: 0.8123)":          ("ensemble2",  None),
+    "DenseNet-121    (AUC: 0.8004) baseline":  ("densenet",   None),
+    "EfficientNet-B4 (AUC: 0.8051)":           ("efficientnet", None),
+    "XRV-DenseNet    (AUC: 0.7860) 4dataset":  ("xrv",        None),
+}
+
+def get_probs(model_key, input_t, xrv_t):
+    if model_key == "densenet":
+        with torch.no_grad():
+            return torch.sigmoid(model(input_t)).cpu().numpy()[0]
+    elif model_key == "efficientnet":
+        with torch.no_grad():
+            return torch.sigmoid(effnet(input_t)).cpu().numpy()[0]
+    elif model_key == "xrv":
+        with torch.no_grad():
+            return torch.sigmoid(xrv_model(xrv_t)).cpu().numpy()[0]
+    elif model_key == "ensemble2":
+        with torch.no_grad():
+            p1 = torch.sigmoid(model(input_t)).cpu().numpy()[0]
+            p2 = torch.sigmoid(effnet(input_t)).cpu().numpy()[0]
+        return 0.5 * p1 + 0.5 * p2
+    else:  # ensemble3
+        with torch.no_grad():
+            p1 = torch.sigmoid(model(input_t)).cpu().numpy()[0]
+            p2 = torch.sigmoid(effnet(input_t)).cpu().numpy()[0]
+            p3 = torch.sigmoid(xrv_model(xrv_t)).cpu().numpy()[0]
+        return 0.4 * p1 + 0.4 * p2 + 0.2 * p3
 
 tf = transforms.Compose([
     transforms.Resize(256),
@@ -206,10 +238,53 @@ def generate_report(probs):
     return "\n".join(lines)
 
 
+# ===== ベンチマーク履歴グラフ =====
+BENCHMARK_CSV = '/media/morita/ubuntuHDD/chestxray/benchmark_results.csv'
+
+def build_benchmark_fig():
+    df = pd.read_csv(BENCHMARK_CSV)
+    # ベストのみ（同名モデルは最高AUCの行）
+    best = df.loc[df.groupby('model')['mean_auc'].idxmax()].sort_values('mean_auc')
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # 左: 全モデルの Mean AUC 棒グラフ
+    colors = ['#e74c3c' if 'Ensemble' in m else '#3498db' for m in best['model']]
+    axes[0].barh(best['model'], best['mean_auc'], color=colors)
+    axes[0].axvline(x=0.778, color='gray', linestyle='--', linewidth=1, label='放射線科医 0.778')
+    axes[0].axvline(x=0.841, color='orange', linestyle='--', linewidth=1, label='CheXNet 0.841')
+    axes[0].set_xlim(0.65, 0.97)
+    axes[0].set_xlabel('Mean AUC')
+    axes[0].set_title('モデル進化の比較（赤: アンサンブル）')
+    axes[0].legend(fontsize=8)
+    for i, (_, row) in enumerate(best.iterrows()):
+        axes[0].text(row['mean_auc'] + 0.002, i, f"{row['mean_auc']:.4f}", va='center', fontsize=8)
+
+    # 右: 疾患別 AUC ヒートマップ（上位モデル5つ）
+    top5 = best.tail(5)[DISEASES].T
+    top5.columns = best.tail(5)['model'].str[:20].values
+    im = axes[1].imshow(top5.values.astype(float), cmap='RdYlGn', vmin=0.65, vmax=0.97, aspect='auto')
+    axes[1].set_xticks(range(len(top5.columns)))
+    axes[1].set_xticklabels(top5.columns, rotation=30, ha='right', fontsize=7)
+    axes[1].set_yticks(range(len(DISEASES_JP)))
+    axes[1].set_yticklabels(DISEASES_JP, fontsize=8)
+    axes[1].set_title('疾患別 AUC ヒートマップ（上位5モデル）')
+    plt.colorbar(im, ax=axes[1])
+    for i in range(len(DISEASES)):
+        for j in range(len(top5.columns)):
+            val = top5.values[i, j]
+            if not np.isnan(float(val)):
+                axes[1].text(j, i, f'{float(val):.2f}', ha='center', va='center', fontsize=6)
+
+    plt.tight_layout()
+    return fig
+
 # ===== 推論関数 =====
-def predict(file_obj, cam_method='GradCAM++', cam_threshold=0.4):
+def predict(file_obj, model_choice, cam_method='GradCAM++', cam_threshold=0.4):
     if file_obj is None:
         return {}, None, None, None, "", ""
+
+    model_key = MODEL_OPTIONS.get(model_choice, ("ensemble3", None))[0]
 
     path = file_obj.name
     ext  = os.path.splitext(path)[-1].lower()
@@ -224,17 +299,12 @@ def predict(file_obj, cam_method='GradCAM++', cam_threshold=0.4):
     img_np   = np.array(img_rgb).astype(np.float32) / 255.0
     input_t  = tf(pil_img).unsqueeze(0).to(device)
 
-    # 3モデルアンサンブル推論（Dense:Eff:XRV = 0.4:0.4:0.2）
-    # XRV用に grayscale [-1024,1024] テンソルを準備
+    # XRV用テンソル
     gray = pil_img.resize((224, 224)).convert('L')
     gray_arr = (np.array(gray).astype(np.float32) / 255.0) * 2048.0 - 1024.0
     xrv_t = torch.FloatTensor(gray_arr).unsqueeze(0).unsqueeze(0).to(device)
 
-    with torch.no_grad():
-        p_dense  = torch.sigmoid(model(input_t)).cpu().numpy()[0]
-        p_effnet = torch.sigmoid(effnet(input_t)).cpu().numpy()[0]
-        p_xrv    = torch.sigmoid(xrv_model(xrv_t)).cpu().numpy()[0]
-    probs = 0.4 * p_dense + 0.4 * p_effnet + 0.2 * p_xrv
+    probs = get_probs(model_key, input_t, xrv_t)
 
     # 結果ラベル（上位疾患）
     label_dict = {}
@@ -287,67 +357,75 @@ def predict(file_obj, cam_method='GradCAM++', cam_threshold=0.4):
 with gr.Blocks(title="胸部X線AI診断") as demo:
     gr.Markdown("""
     # 胸部X線AI診断システム
-    **DenseNet-121 + EfficientNet-B4 + XRV-DenseNet 3モデルアンサンブル / NIH ChestX-ray14学習済み（Mean AUC: 0.8149）**
-
-    > ⚠️ 本ツールは研究・学習目的のみです。臨床診断には使用しないでください。
+    **NIH ChestX-ray14学習済み｜最高 Mean AUC: 0.8149（3モデルアンサンブル）**
+    > ⚠️ 研究・学習目的のみ。臨床診断には使用しないでください。
     """)
 
-    with gr.Row():
-        with gr.Column(scale=1):
-            file_input  = gr.File(
-                label="胸部X線画像をアップロード（DICOM / PNG / JPG）",
-            )
-            meta_output = gr.Textbox(label="DICOMメタ情報", interactive=False)
+    with gr.Tabs():
+        # ===== TAB 1: 診断 =====
+        with gr.Tab("診断"):
             with gr.Row():
-                cam_selector = gr.Dropdown(
-                    choices=list(CAM_METHODS.keys()),
-                    value='GradCAM++',
-                    label="CAM 手法",
-                )
-                cam_thresh = gr.Slider(
-                    minimum=0.0, maximum=0.9, value=0.4, step=0.05,
-                    label="集中度（高いほど狭い）",
-                )
-            run_btn = gr.Button("診断する", variant="primary")
+                with gr.Column(scale=1):
+                    file_input  = gr.File(label="画像をアップロード（DICOM / PNG / JPG）")
+                    meta_output = gr.Textbox(label="DICOMメタ情報", interactive=False)
+                    model_selector = gr.Dropdown(
+                        choices=list(MODEL_OPTIONS.keys()),
+                        value=list(MODEL_OPTIONS.keys())[0],
+                        label="使用モデル",
+                    )
+                    with gr.Row():
+                        cam_selector = gr.Dropdown(
+                            choices=list(CAM_METHODS.keys()),
+                            value='GradCAM++',
+                            label="CAM 手法",
+                        )
+                        cam_thresh = gr.Slider(
+                            minimum=0.0, maximum=0.9, value=0.4, step=0.05,
+                            label="集中度",
+                        )
+                    run_btn = gr.Button("診断する", variant="primary")
 
-    with gr.Row():
-        orig_output = gr.Image(label="元画像")
-        cam_output  = gr.Image(label="CAM（注目領域）")
+            with gr.Row():
+                orig_output = gr.Image(label="元画像")
+                cam_output  = gr.Image(label="CAM（注目領域）")
 
-    with gr.Row():
-        label_output = gr.Label(num_top_classes=5, label="上位5疾患")
-        chart_output = gr.Plot(label="疾患別確率")
+            with gr.Row():
+                label_output = gr.Label(num_top_classes=5, label="上位5疾患")
+                chart_output = gr.Plot(label="疾患別確率")
 
-    with gr.Row():
-        report_output = gr.Textbox(
-            label="AI自動読影レポート",
-            lines=20,
-            interactive=False,
-        )
+            with gr.Row():
+                report_output = gr.Textbox(label="AI自動読影レポート", lines=20, interactive=False)
 
-    run_btn.click(
-        fn=predict,
-        inputs=[file_input, cam_selector, cam_thresh],
-        outputs=[label_output, orig_output, cam_output, chart_output, meta_output, report_output]
-    )
+            run_btn.click(
+                fn=predict,
+                inputs=[file_input, model_selector, cam_selector, cam_thresh],
+                outputs=[label_output, orig_output, cam_output, chart_output, meta_output, report_output]
+            )
 
-    gr.Markdown("""
-    ### 使い方
-    1. 胸部X線画像（**DICOM / PNG / JPG**）をアップロード
-    2. **CAM 手法**と**集中度**を選択（デフォルト: GradCAM++ / 0.4）
-    3. 「診断する」をクリック
-    4. 元画像と CAM を比較 / AI自動読影レポートを確認
+        # ===== TAB 2: モデル進化の記録 =====
+        with gr.Tab("モデル進化の記録"):
+            gr.Markdown("""
+            ### 学習・改善の記録
+            各モデルのテストセット AUC（NIH ChestX-ray14 公式テスト 25,596枚）
+            """)
+            refresh_btn = gr.Button("グラフを更新", variant="secondary")
+            bench_plot  = gr.Plot(label="精度の進化")
+            refresh_btn.click(fn=build_benchmark_fig, inputs=[], outputs=bench_plot)
+            demo.load(fn=build_benchmark_fig, inputs=[], outputs=bench_plot)
 
-    | 手法 | 特徴 |
-    |------|------|
-    | GradCAM++ | 標準より狭く正確、複数病変に強い |
-    | LayerCAM | 非常に精密・小病変向き |
-    | EigenCAM | グラデーションなし、安定 |
-    | HiResCAM | 高解像度 |
-    | ScoreCAM | 勾配不要、ノイズ少ない（低速） |
+            gr.Markdown("""
+            | モデル | Mean AUC | 改善点 |
+            |--------|----------|--------|
+            | DenseNet-121 | 0.8004 | ImageNet転移学習ベースライン |
+            | EfficientNet-B4 | 0.8051 | Dropout・EarlyStopping追加 |
+            | Ensemble 2モデル | 0.8123 | 予測値の平均アンサンブル |
+            | XRV Fine-tune | 0.7860 | 4データセット事前学習（単体） |
+            | **Ensemble 3モデル** | **0.8149** | 多様性アンサンブルで最高精度 |
+            | 放射線科医（参考）| 0.778 | Wang et al. 2017 |
+            | CheXNet（参考）| 0.841 | Stanford 2017 |
 
-    > ⚠️ 実際の患者画像を使用する場合は**必ず匿名化済みのもの**を使用してください。
-    """)
+            > 将来追加予定: Swin Transformer / ViT-B
+            """)
 
 if __name__ == '__main__':
     demo.launch(share=False, server_port=7862)
