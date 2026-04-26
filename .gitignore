@@ -37,3 +37,13 @@ nohup.out
 # OS
 .DS_Store
 Thumbs.db
+
+# NIHデータセットCSV・PDF（大容量）
+Data_Entry_2017.csv
+BBox_List_2017.csv
+ARXIV_V5_CHESTXRAY.pdf
+FAQ_CHESTXRAY.pdf
+LOG_CHESTXRAY.pdf
+README_CHESTXRAY.pdf
+test_list.txt
+train_val_list.txt
